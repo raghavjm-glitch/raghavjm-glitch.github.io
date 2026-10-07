@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your secret message</title>
+<style>
+  :root { --red:#EF3340; --ink:#2B2A28; --mute:#66615B; --paper:#F7F5F2; --line:#E6E1DB; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system, "Segoe UI", Roboto, sans-serif; background:var(--paper); color:var(--ink); }
+  main { max-width:480px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:26px; margin:18px 0 6px; }
+  p { line-height:1.45; margin:8px 0; }
+  .mute { color:var(--mute); font-size:15px; }
+  video { width:100%; border-radius:16px; background:#000; margin:16px 0 8px; display:none; aspect-ratio:9/16; max-height:60vh; }
+  button, label.btn { display:block; width:100%; border:0; border-radius:14px; padding:16px; font-size:18px; font-weight:700; margin-top:12px; text-align:center; cursor:pointer; }
+  .primary { background:var(--red); color:#fff; }
+  .secondary { background:#fff; color:var(--ink); border:1.5px solid var(--line); }
+  .hidden { display:none !important; }
+  .bar { height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin-top:14px; display:none; }
+  .bar i { display:block; height:100%; width:0; background:var(--red); transition:width .2s; }
+  .note { margin-top:18px; font-size:14px; color:var(--mute); }
+  .ok { color:#1E7F4F; font-weight:700; }
+  .err { color:var(--red); font-weight:700; }
+  input[type=file] { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <div style="font-size:14px;color:var(--mute)">Ala</div>
+  <h1>Leave a secret message</h1>
+  <p class="mute">Up to 30 seconds. Only the person who opens your card and points their phone at it will see it, inside the card.</p>
+
+  <p id="status" class="mute"></p>
+  <video id="player" controls playsinline></video>
+  <div class="bar" id="bar"><i id="fill"></i></div>
+
+  <div id="recorder" class="hidden">
+    <video id="live" autoplay muted playsinline style="display:block;transform:scaleX(-1)"></video>
+    <div id="count" style="text-align:center;font-size:40px;font-weight:800;margin-top:6px">30</div>
+    <button class="primary" id="stopBtn">Stop</button>
+  </div>
+  <button class="primary" id="recordBtn">Record now</button>
+  <input id="pick" type="file" accept="video/*" capture="user">
+  <label class="btn secondary" id="uploadBtn" for="pickAny">Choose a video from my phone</label>
+  <input id="pickAny" type="file" accept="video/*">
+  <button class="primary hidden" id="saveBtn">Save this message</button>
+  <button class="secondary hidden" id="againBtn">Record again</button>
+
+  <p class="note">Keep this page open or bookmark it: you can come back and record at home. The link is private; it is not printed on the card.</p>
+</main>
+<script>
+// Who this page is for: the AR code on the card (o) and the key from the
+// kiosk's secret QR (k). Without both it does nothing.
+const q = new URLSearchParams(location.search);
+const code = (q.get('o') || '').toUpperCase().replace(/[^2-9A-Z]/g, '');
+const key = q.get('k') || '';
+const $ = id => document.getElementById(id);
+
+// The same bucket, folder and anonymous identity the kiosk and the app
+// already use for card pages. Public-read, so the app can simply fetch it.
+const REGION = 'ap-south-1', BUCKET = 'alacard';
+const POOL = 'ap-south-1:6d92d1b1-d27c-4717-b9ac-71f8af80320f';
+const base = `https://${BUCKET}.s3.${REGION}.amazonaws.com`;
+const videoKey = `cms/ar/${code}/message.mp4`;
+const videoUrl = `${base}/${videoKey}`;
+
+let file = null;
+
+if (!code || !key) {
+  $('status').innerHTML = '<span class="err">This link is incomplete. Scan the QR on the kiosk screen again.</span>';
+  $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
+} else {
+  // A message already saved for this card shows first, with the option to
+  // replace it; the page is the sender's for as long as they keep the link.
+  fetch(videoUrl, { method: 'HEAD', cache: 'no-store' }).then(r => {
+    if (r.ok) {
+      showVideo(videoUrl + '?t=' + Date.now());
+      $('status').innerHTML = '<span class="ok">Your message is saved on this card.</span> You can record a new one to replace it.';
+      $('recordBtn').textContent = 'Record a new one';
+    }
+  }).catch(() => {});
+}
+
+function showVideo(src) { const v = $('player'); v.src = src; v.style.display = 'block'; }
+
+function picked(input) {
+  file = input.files && input.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  showVideo(url);
+  const v = $('player');
+  v.onloadedmetadata = () => {
+    if (v.duration > 35) {
+      $('status').innerHTML = '<span class="err">That is ' + Math.round(v.duration) + ' seconds. Please keep it under 30.</span>';
+      $('saveBtn').classList.add('hidden');
+    } else {
+      $('status').textContent = 'Play it back. Happy with it? Save it.';
+      $('saveBtn').classList.remove('hidden');
+    }
+    $('againBtn').classList.remove('hidden');
+    $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
+  };
+}
+$('pick').onchange = e => picked(e.target);
+$('pickAny').onchange = e => picked(e.target);
+$('againBtn').onclick = () => startRecording();
+$('recordBtn').onclick = () => startRecording();
+
+// --- recording in the page: a countdown, 720p, about 2 Mbps -------------
+// Only when the browser can write an MP4 that an iPhone will play back;
+// otherwise the phone's own camera app records, and the file is sent as is.
+const LIMIT = 30;
+const mp4Type = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/mp4']
+  .find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+let stream = null, recorder = null, timer = null, chunks = [];
+
+async function startRecording() {
+  if (!mp4Type || !navigator.mediaDevices) { $('pick').value = ''; $('pick').click(); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 1280 }, frameRate: { ideal: 30 } },
+    });
+  } catch (e) {
+    // No camera permission for the page: the camera app still works.
+    $('pick').value = ''; $('pick').click(); return;
+  }
+  $('player').style.display = 'none';
+  $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
+  $('saveBtn').classList.add('hidden'); $('againBtn').classList.add('hidden');
+  $('recorder').classList.remove('hidden');
+  $('live').srcObject = stream;
+  chunks = [];
+  recorder = new MediaRecorder(stream, { mimeType: mp4Type, videoBitsPerSecond: 2000000, audioBitsPerSecond: 96000 });
+  recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
+    $('recorder').classList.add('hidden');
+    const blob = new Blob(chunks, { type: 'video/mp4' });
+    file = new File([blob], 'message.mp4', { type: 'video/mp4' });
+    showVideo(URL.createObjectURL(blob));
+    $('status').textContent = 'Play it back. Happy with it? Save it.';
+    $('saveBtn').classList.remove('hidden');
+    $('againBtn').classList.remove('hidden');
+  };
+  let left = LIMIT;
+  $('count').textContent = left;
+  $('status').textContent = 'Recording… tap Stop when you are done.';
+  recorder.start(1000);
+  timer = setInterval(() => {
+    left -= 1;
+    $('count').textContent = left;
+    if (left <= 0) stopRecording();
+  }, 1000);
+}
+function stopRecording() {
+  clearInterval(timer);
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+}
+$('stopBtn').onclick = stopRecording;
+
+$('saveBtn').onclick = async () => {
+  if (!file) return;
+  $('saveBtn').disabled = true; $('saveBtn').textContent = 'Saving…';
+  $('bar').style.display = 'block';
+  try {
+    await putToS3(videoKey, file, file.type || 'video/mp4', p => $('fill').style.width = Math.round(p * 100) + '%');
+    $('status').innerHTML = '<span class="ok">Saved. It plays inside the card when they open it.</span>';
+    $('saveBtn').classList.add('hidden'); $('againBtn').textContent = 'Record a new one';
+  } catch (e) {
+    $('status').innerHTML = '<span class="err">Could not save (' + (e.message || e) + '). Check the internet and try again.</span>';
+    $('saveBtn').disabled = false; $('saveBtn').textContent = 'Save this message';
+  }
+  $('bar').style.display = 'none';
+};
+
+// --- anonymous Cognito identity + SigV4 PUT, in the browser --------------
+async function cognito(target, body) {
+  const r = await fetch(`https://cognito-identity.${REGION}.amazonaws.com/`, {
+    method: 'POST', headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': target }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error('identity ' + r.status);
+  return r.json();
+}
+async function credentials() {
+  const { IdentityId } = await cognito('AWSCognitoIdentityService.GetId', { IdentityPoolId: POOL });
+  const { Credentials } = await cognito('AWSCognitoIdentityService.GetCredentialsForIdentity', { IdentityId });
+  return Credentials;
+}
+const enc = new TextEncoder();
+const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+async function sha256(data) { return hex(await crypto.subtle.digest('SHA-256', data)); }
+async function hmac(key, msg) {
+  const k = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return crypto.subtle.sign('HMAC', k, enc.encode(msg));
+}
+async function putToS3(key, blob, type, onProgress) {
+  const c = await credentials();
+  const host = `${BUCKET}.s3.${REGION}.amazonaws.com`;
+  const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const date = now.slice(0, 8);
+  const payloadHash = await sha256(await blob.arrayBuffer());
+  const headers = { 'content-type': type, 'host': host, 'x-amz-acl': 'public-read', 'x-amz-content-sha256': payloadHash, 'x-amz-date': now, 'x-amz-security-token': c.SessionToken };
+  const names = Object.keys(headers).sort();
+  const canonical = ['PUT', '/' + key, '', names.map(n => n + ':' + headers[n] + '\n').join(''), names.join(';'), payloadHash].join('\n');
+  const scope = `${date}/${REGION}/s3/aws4_request`;
+  const toSign = ['AWS4-HMAC-SHA256', now, scope, await sha256(enc.encode(canonical))].join('\n');
+  let k = await hmac(enc.encode('AWS4' + c.SecretKey), date);
+  k = await hmac(k, REGION); k = await hmac(k, 's3'); k = await hmac(k, 'aws4_request');
+  const sig = hex(await hmac(k, toSign));
+  const auth = `AWS4-HMAC-SHA256 Credential=${c.AccessKeyId}/${scope}, SignedHeaders=${names.join(';')}, Signature=${sig}`;
+  await new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', `https://${host}/${key}`);
+    for (const n of names) if (n !== 'host') x.setRequestHeader(n, headers[n]);
+    x.setRequestHeader('authorization', auth);
+    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => x.status < 300 ? resolve() : reject(new Error('upload ' + x.status));
+    x.onerror = () => reject(new Error('network'));
+    x.send(blob);
+  });
+}
+</script>
+</body>
+</html>

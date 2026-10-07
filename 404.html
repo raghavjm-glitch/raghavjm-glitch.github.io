@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>This card comes alive</title>
+<style>
+  :root { --red:#EF3340; --ink:#2B2A28; --mute:#66615B; --paper:#F7F5F2; --line:#E6E1DB; }
+  body { margin:0; font-family:-apple-system, "Segoe UI", Roboto, sans-serif; background:var(--paper); color:var(--ink); }
+  main { max-width:480px; margin:0 auto; padding:40px 20px; text-align:center; }
+  h1 { font-size:28px; margin:12px 0; }
+  p { line-height:1.45; color:var(--mute); }
+  a.btn { display:block; border-radius:14px; padding:16px; font-size:18px; font-weight:700; margin-top:12px; text-decoration:none; }
+  .primary { background:var(--red); color:#fff; }
+  .secondary { background:#fff; color:var(--ink); border:1.5px solid var(--line); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <div style="font-size:14px;color:var(--mute)">Ala</div>
+  <h1>This card comes alive</h1>
+  <p>Open the Ala app and point your phone at the front of the card.</p>
+  <a class="btn primary" id="open" href="#">Open in Ala</a>
+  <a class="btn secondary hidden" id="ios" href="https://apps.apple.com/app/id0000000000">Get Ala on the App Store</a>
+  <a class="btn secondary hidden" id="android" href="https://play.google.com/store/apps/details?id=io.alacard.app">Get Ala on Google Play</a>
+  <p id="hint" style="font-size:14px;margin-top:24px"></p>
+</main>
+<script>
+// The public QR inside the card lands here: /c/<CODE> on alacard.io, or
+// /c/?o=<CODE> on the test host. If Ala is installed the app link opens it
+// straight into the scanner; otherwise the store. Store ids are filled in
+// when the public listings exist.
+const q = new URLSearchParams(location.search);
+const fromPath = location.pathname.match(/\/c\/([2-9A-Z]{6,12})\/?$/i);
+const code = ((q.get('o') || (fromPath && fromPath[1]) || '')).toUpperCase().replace(/[^2-9A-Z]/g, '');
+const ua = navigator.userAgent;
+const isIOS = /iPhone|iPad|iPod/.test(ua), isAndroid = /Android/.test(ua);
+const appLink = 'ala://c?o=' + code;
+$ = id => document.getElementById(id);
+$('open').href = isAndroid
+  ? `intent://c?o=${code}#Intent;scheme=ala;package=io.alacard.app;S.browser_fallback_url=${encodeURIComponent('https://play.google.com/store/apps/details?id=io.alacard.app')};end`
+  : appLink;
+if (isIOS) $('ios').classList.remove('hidden');
+if (isAndroid) $('android').classList.remove('hidden');
+if (!code) $('hint').textContent = 'This link has no card code. Scan the QR inside the card again.';
+else {
+  // Try the app at once; if nothing happens the person is still here and
+  // sees the store button.
+  setTimeout(() => { location.href = $('open').href; }, 300);
+  // Remember the code for the app's first launch after install (same
+  // phone, same browser): Branch-style deferred linking comes later.
+  try { localStorage.setItem('ala_pending_code', code); } catch (e) {}
+}
+</script>
+</body>
+</html>

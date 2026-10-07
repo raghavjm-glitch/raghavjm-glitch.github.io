@@ -90,6 +90,12 @@ function picked(input) {
   if (!file) return;
   const url = URL.createObjectURL(file);
   showVideo(url);
+  // Save is offered at once; the length check below tightens it when the
+  // preview has loaded (some browsers load it late).
+  $('saveBtn').classList.remove('hidden');
+  $('againBtn').classList.remove('hidden');
+  $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
+  $('status').textContent = 'Play it back. Happy with it? Save it.';
   const v = $('player');
   v.onloadedmetadata = () => {
     if (v.duration > 35) {

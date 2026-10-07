@@ -28,7 +28,9 @@
   .layer { position:fixed; inset:0; background:#000; z-index:10; display:none; }
   .layer.on { display:block; }
   .layer video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; margin:0; border-radius:0; max-height:none; aspect-ratio:auto; display:block; }
-  #live.mirror { transform:scaleX(-1); }
+  #view { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  #view.mirror { transform:scaleX(-1); }
+  .info { position:absolute; top:calc(64px + env(safe-area-inset-top)); left:12px; right:12px; color:#fff; font:12px/1.3 monospace; background:#0007; padding:4px 8px; border-radius:6px; }
   #review video { object-fit:contain; }
   .top { position:absolute; top:0; left:0; right:0; padding:calc(14px + env(safe-area-inset-top)) 16px 30px; display:flex; justify-content:space-between; align-items:center; background:linear-gradient(#0008,#0000); color:#fff; font-weight:700; }
   .time { font-size:20px; font-variant-numeric:tabular-nums; padding:4px 12px; border-radius:20px; }
@@ -65,7 +67,9 @@
 </main>
 
 <div class="layer" id="camera">
-  <video id="live" class="mirror" autoplay muted playsinline></video>
+  <video id="live" autoplay muted playsinline style="position:absolute;width:2px;height:2px;opacity:0;pointer-events:none"></video>
+  <canvas id="view"></canvas>
+  <div id="camInfo" class="info hidden"></div>
   <div class="top"><button class="x" id="closeCam" aria-label="Close">&times;</button><span class="time" id="count">0:30</span><span style="width:30px"></span></div>
   <div class="bottom">
     <p class="hint" id="camHint">Tap the red button to start. Up to 30 seconds.</p>
@@ -182,14 +186,26 @@ const canvas = document.createElement('canvas');
 canvas.width = OUT_W; canvas.height = OUT_H;
 const ctx = canvas.getContext('2d');
 
+// Ask for the camera's own picture, uncropped. Asking Chrome for a 9:16
+// shape makes it crop the sensor, and the face looks zoomed in (Raghav's
+// Pixel, 7 Oct). Framing is done here instead, where it can be gentle.
 async function getCamera() {
-  const s = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: facing, width: { ideal: 1080 }, height: { ideal: 1920 }, aspectRatio: { ideal: 9 / 16 }, frameRate: { ideal: 30 } },
-  });
+  const base = { facingMode: facing, frameRate: { ideal: 30 } };
+  let s;
+  try { s = await navigator.mediaDevices.getUserMedia({ video: { ...base, width: { ideal: 1280 }, resizeMode: { ideal: 'none' } } }); }
+  catch (e) { s = await navigator.mediaDevices.getUserMedia({ video: base }); }
   if (stream) stream.getVideoTracks().forEach(t => t.stop());
   stream = s;
+  // The widest view the camera allows.
+  const track = s.getVideoTracks()[0];
+  try {
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.zoom && caps.zoom.min !== undefined) await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+  } catch (e) {}
   $('live').srcObject = s;
-  $('live').classList.toggle('mirror', facing === 'user');
+  $('live').play().catch(() => {});
+  $('view').classList.toggle('mirror', facing === 'user');
+  if (!drawing) draw();
 }
 function stopCamera() {
   cancelAnimationFrame(drawing); drawing = 0;
@@ -223,21 +239,61 @@ $('flip').onclick = async () => {
   try { await getCamera(); } catch (e) { facing = facing === 'user' ? 'environment' : 'user'; }
 };
 
-// One frame of the camera into the 9:16 canvas: cover-cropped from the
-// centre, like the preview. Saved unmirrored, as the phone's camera saves.
-function draw() {
+// A tiny copy of the frame, stretched back up, is a soft blur that works in
+// every browser (canvas filters do not, in older Safari).
+const small = document.createElement('canvas');
+small.width = 36; small.height = 64;
+const sctx = small.getContext('2d');
+const view = $('view');
+view.width = OUT_W; view.height = OUT_H;
+const vctx = view.getContext('2d');
+const tester = key === 'TEST';
+let infoAt = 0;
+
+// One camera frame into the 9:16 picture that is both shown and recorded.
+// A portrait picture fills it. A wide one is kept whole (a little fuller
+// than fitting the width) over a soft blurred copy of itself, so the face
+// and shoulders stay in and nothing looks zoomed. Saved unmirrored, as the
+// phone's camera saves; only the preview is mirrored.
+function frame(c) {
   const v = $('live');
   const vw = v.videoWidth, vh = v.videoHeight;
-  if (vw && vh) {
-    const scale = Math.max(OUT_W / vw, OUT_H / vh);
-    const sw = OUT_W / scale, sh = OUT_H / scale;
-    ctx.drawImage(v, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, OUT_W, OUT_H);
+  if (!vw || !vh) return '';
+  const ar = vw / vh;
+  if (ar <= 0.62) {
+    const sc = Math.max(OUT_W / vw, OUT_H / vh);
+    const sw = OUT_W / sc, sh = OUT_H / sc;
+    c.drawImage(v, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, OUT_W, OUT_H);
+    return 'fill';
+  }
+  const cs = Math.max(36 / vw, 64 / vh);
+  const cw = 36 / cs, ch = 64 / cs;
+  sctx.drawImage(v, (vw - cw) / 2, (vh - ch) / 2, cw, ch, 0, 0, 36, 64);
+  c.imageSmoothingEnabled = true;
+  c.drawImage(small, 0, 0, OUT_W, OUT_H);
+  c.fillStyle = 'rgba(0,0,0,0.25)';
+  c.fillRect(0, 0, OUT_W, OUT_H);
+  const s = Math.min((OUT_W / vw) * 1.15, OUT_H / vh);
+  const dw = vw * s, dh = vh * s;
+  c.drawImage(v, (OUT_W - dw) / 2, (OUT_H - dh) / 2, dw, dh);
+  return 'whole';
+}
+function draw() {
+  const mode = frame(ctx);
+  vctx.drawImage(canvas, 0, 0);
+  if (tester && stream && performance.now() - infoAt > 1000) {
+    infoAt = performance.now();
+    const t = stream.getVideoTracks()[0];
+    const st = t && t.getSettings ? t.getSettings() : {};
+    const caps = t && t.getCapabilities ? t.getCapabilities() : {};
+    const v = $('live');
+    $('camInfo').textContent = `camera ${st.width}x${st.height} ar ${st.aspectRatio ? st.aspectRatio.toFixed(2) : '-'} zoom ${st.zoom ?? '-'} (min ${caps.zoom ? caps.zoom.min : '-'}) ${st.resizeMode || ''} · video ${v.videoWidth}x${v.videoHeight} · ${mode}`;
+    $('camInfo').classList.remove('hidden');
   }
   drawing = requestAnimationFrame(draw);
 }
 
 function startRecording() {
-  draw();
   const out = canvas.captureStream(30);
   audio.getAudioTracks().forEach(t => out.addTrack(t));
   chunks = []; discard = false;

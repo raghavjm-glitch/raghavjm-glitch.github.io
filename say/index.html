@@ -24,6 +24,27 @@
   .ok { color:#1E7F4F; font-weight:700; }
   .err { color:var(--red); font-weight:700; }
   input[type=file] { display:none; }
+  /* The phone's own camera: full screen, portrait, edge to edge. */
+  .layer { position:fixed; inset:0; background:#000; z-index:10; display:none; }
+  .layer.on { display:block; }
+  .layer video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; margin:0; border-radius:0; max-height:none; aspect-ratio:auto; display:block; }
+  #live.mirror { transform:scaleX(-1); }
+  #review video { object-fit:contain; }
+  .top { position:absolute; top:0; left:0; right:0; padding:calc(14px + env(safe-area-inset-top)) 16px 30px; display:flex; justify-content:space-between; align-items:center; background:linear-gradient(#0008,#0000); color:#fff; font-weight:700; }
+  .time { font-size:20px; font-variant-numeric:tabular-nums; padding:4px 12px; border-radius:20px; }
+  .time.rec { background:var(--red); }
+  .x { background:none; border:0; color:#fff; font-size:30px; width:auto; padding:0 6px; margin:0; line-height:1; }
+  .bottom { position:absolute; left:0; right:0; bottom:0; padding:30px 24px calc(28px + env(safe-area-inset-bottom)); background:linear-gradient(#0000,#0009); }
+  .controls { display:flex; align-items:center; justify-content:center; position:relative; height:84px; }
+  .shutter { width:80px; height:80px; border-radius:50%; border:5px solid #fff; background:transparent; padding:0; margin:0; display:flex; align-items:center; justify-content:center; }
+  .shutter i { display:block; width:62px; height:62px; border-radius:50%; background:var(--red); transition:all .2s; }
+  .shutter.rec i { width:30px; height:30px; border-radius:6px; }
+  .flip { position:absolute; right:8px; width:52px; height:52px; border-radius:50%; background:#fff3; color:#fff; border:0; padding:0; margin:0; font-size:24px; }
+  .hint { color:#fff; text-align:center; font-size:15px; margin:0 0 14px; text-shadow:0 1px 3px #000; }
+  #review .bottom button { margin-top:10px; }
+  #review .bar { margin:0 0 6px; }
+  .play { position:absolute; left:50%; top:45%; transform:translate(-50%,-50%); width:84px; height:84px; border-radius:50%; background:#0008; color:#fff; font-size:38px; display:flex; align-items:center; justify-content:center; padding-left:6px; pointer-events:none; }
+  #review .msg { color:#fff; text-align:center; font-size:16px; margin:0 0 8px; text-shadow:0 1px 3px #000; }
 </style>
 </head>
 <body>
@@ -33,23 +54,39 @@
   <p class="mute">Up to 30 seconds. Only the person who opens your card and points their phone at it will see it, inside the card.</p>
 
   <p id="status" class="mute"></p>
-  <video id="player" controls playsinline></video>
-  <div class="bar" id="bar"><i id="fill"></i></div>
 
-  <div id="recorder" class="hidden">
-    <video id="live" autoplay muted playsinline style="display:block;transform:scaleX(-1)"></video>
-    <div id="count" style="text-align:center;font-size:40px;font-weight:800;margin-top:6px">30</div>
-    <button class="primary" id="stopBtn">Stop</button>
-  </div>
   <button class="primary" id="recordBtn">Record now</button>
   <input id="pick" type="file" accept="video/*" capture="user">
   <label class="btn secondary" id="uploadBtn" for="pickAny">Choose a video from my phone</label>
   <input id="pickAny" type="file" accept="video/*">
-  <button class="primary hidden" id="saveBtn">Save this message</button>
-  <button class="secondary hidden" id="againBtn">Record again</button>
+  <button class="secondary hidden" id="watchBtn">Watch my message</button>
 
   <p class="note">Keep this page open or bookmark it: you can come back and record at home. The link is private; it is not printed on the card.</p>
 </main>
+
+<div class="layer" id="camera">
+  <video id="live" class="mirror" autoplay muted playsinline></video>
+  <div class="top"><button class="x" id="closeCam" aria-label="Close">&times;</button><span class="time" id="count">0:30</span><span style="width:30px"></span></div>
+  <div class="bottom">
+    <p class="hint" id="camHint">Tap the red button to start. Up to 30 seconds.</p>
+    <div class="controls">
+      <button class="shutter" id="shutter" aria-label="Record"><i></i></button>
+      <button class="flip" id="flip" aria-label="Switch camera">&#x21C4;</button>
+    </div>
+  </div>
+</div>
+
+<div class="layer" id="review">
+  <video id="player" playsinline loop></video>
+  <div class="play hidden" id="playIcon">&#9654;</div>
+  <div class="top"><button class="x" id="closeReview" aria-label="Close">&times;</button><span></span><span></span></div>
+  <div class="bottom">
+    <p class="msg" id="reviewMsg">Happy with it? Save it.</p>
+    <div class="bar" id="bar"><i id="fill"></i></div>
+    <button class="primary" id="saveBtn">Save this message</button>
+    <button class="secondary" id="againBtn">Record again</button>
+  </div>
+</div>
 <script>
 // Who this page is for: the AR code on the card (o) and the key from the
 // kiosk's secret QR (k). Without both it does nothing.
@@ -67,97 +104,161 @@ const videoKey = `cms/ar/${code}/message.mp4`;
 const videoUrl = `${base}/${videoKey}`;
 
 let file = null;
+let savedUrl = null;
 
 if (!code || !key) {
   $('status').innerHTML = '<span class="err">This link is incomplete. Scan the QR on the kiosk screen again.</span>';
   $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
 } else {
-  // A message already saved for this card shows first, with the option to
-  // replace it; the page is the sender's for as long as they keep the link.
+  // A message already saved for this card: watch it, or record a new one
+  // to replace it. The page is the sender's for as long as they keep the link.
   fetch(videoUrl, { method: 'HEAD', cache: 'no-store' }).then(r => {
     if (r.ok) {
-      showVideo(videoUrl + '?t=' + Date.now());
+      savedUrl = videoUrl + '?t=' + Date.now();
       $('status').innerHTML = '<span class="ok">Your message is saved on this card.</span> You can record a new one to replace it.';
       $('recordBtn').textContent = 'Record a new one';
+      $('watchBtn').classList.remove('hidden');
     }
   }).catch(() => {});
 }
 
-function showVideo(src) { const v = $('player'); v.src = src; v.style.display = 'block'; }
+// --- full-screen layers ---------------------------------------------------
+function show(id) { for (const l of ['camera', 'review']) $(l).classList.toggle('on', l === id); document.body.style.overflow = id ? 'hidden' : ''; }
+
+// Plays a video full screen, portrait, with Save / Record again at the bottom.
+// `fresh` is a new recording or a chosen file that is not saved yet.
+function review(src, fresh) {
+  const v = $('player');
+  // A fresh recording shows its first frame even before it plays.
+  v.src = src.startsWith('blob:') ? src + '#t=0.05' : src;
+  show('review');
+  $('bar').style.display = 'none';
+  $('saveBtn').disabled = false; $('saveBtn').textContent = 'Save this message';
+  $('saveBtn').classList.toggle('hidden', !fresh);
+  $('againBtn').textContent = fresh ? 'Record again' : 'Record a new one';
+  $('reviewMsg').textContent = fresh ? 'Happy with it? Save it.' : 'This is the message on your card.';
+  v.onloadedmetadata = () => {
+    if (fresh && v.duration > 35 && isFinite(v.duration)) {
+      $('reviewMsg').innerHTML = 'That is ' + Math.round(v.duration) + ' seconds. Please keep it under 30.';
+      $('saveBtn').classList.add('hidden');
+    }
+  };
+  $('playIcon').classList.add('hidden');
+  v.play().catch(() => $('playIcon').classList.remove('hidden'));
+}
+function closeAll() {
+  $('player').pause();
+  stopCamera();
+  show(null);
+}
+$('closeReview').onclick = closeAll;
+// Tap the message to pause or play it, as in the phone's gallery.
+$('player').onclick = () => { const v = $('player'); v.paused ? v.play() : v.pause(); };
+$('player').onplay = () => $('playIcon').classList.add('hidden');
+$('player').onpause = () => $('playIcon').classList.remove('hidden');
+$('closeCam').onclick = () => { if (recorder && recorder.state === 'recording') { discard = true; stopRecording(); } closeAll(); };
+$('watchBtn').onclick = () => review(savedUrl, false);
 
 function picked(input) {
-  file = input.files && input.files[0];
-  if (!file) return;
-  const url = URL.createObjectURL(file);
-  showVideo(url);
-  // Save is offered at once; the length check below tightens it when the
-  // preview has loaded (some browsers load it late).
-  $('saveBtn').classList.remove('hidden');
-  $('againBtn').classList.remove('hidden');
-  $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
-  $('status').textContent = 'Play it back. Happy with it? Save it.';
-  const v = $('player');
-  v.onloadedmetadata = () => {
-    if (v.duration > 35) {
-      $('status').innerHTML = '<span class="err">That is ' + Math.round(v.duration) + ' seconds. Please keep it under 30.</span>';
-      $('saveBtn').classList.add('hidden');
-    } else {
-      $('status').textContent = 'Play it back. Happy with it? Save it.';
-      $('saveBtn').classList.remove('hidden');
-    }
-    $('againBtn').classList.remove('hidden');
-    $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
-  };
+  const f = input.files && input.files[0];
+  if (!f) return;
+  file = f;
+  review(URL.createObjectURL(f), true);
 }
 $('pick').onchange = e => picked(e.target);
 $('pickAny').onchange = e => picked(e.target);
-$('againBtn').onclick = () => startRecording();
-$('recordBtn').onclick = () => startRecording();
+$('againBtn').onclick = () => { $('player').pause(); openCamera(); };
+$('recordBtn').onclick = () => openCamera();
 
-// --- recording in the page: a countdown, 720p, about 2 Mbps -------------
-// Only when the browser can write an MP4 that an iPhone will play back;
-// otherwise the phone's own camera app records, and the file is sent as is.
-const LIMIT = 30;
+// --- the camera, like the phone's own --------------------------------------
+// The preview fills the screen in portrait. Whatever shape the camera sends
+// (the Pixel's front camera sends landscape), what is recorded is a 9:16
+// frame cut from its centre, so the saved message is always portrait.
+const LIMIT = 30, OUT_W = 720, OUT_H = 1280;
 const mp4Type = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/mp4']
   .find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
-let stream = null, recorder = null, timer = null, chunks = [];
+let stream = null, audio = null, recorder = null, timer = null, chunks = [], facing = 'user', drawing = 0, discard = false;
+const canvas = document.createElement('canvas');
+canvas.width = OUT_W; canvas.height = OUT_H;
+const ctx = canvas.getContext('2d');
 
-async function startRecording() {
+async function getCamera() {
+  const s = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facing, width: { ideal: 1080 }, height: { ideal: 1920 }, aspectRatio: { ideal: 9 / 16 }, frameRate: { ideal: 30 } },
+  });
+  if (stream) stream.getVideoTracks().forEach(t => t.stop());
+  stream = s;
+  $('live').srcObject = s;
+  $('live').classList.toggle('mirror', facing === 'user');
+}
+function stopCamera() {
+  cancelAnimationFrame(drawing); drawing = 0;
+  clearInterval(timer);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (audio) audio.getTracks().forEach(t => t.stop());
+  stream = null; audio = null;
+}
+function setCount(left) { $('count').textContent = '0:' + String(left).padStart(2, '0'); }
+
+async function openCamera() {
   if (!mp4Type || !navigator.mediaDevices) { $('pick').value = ''; $('pick').click(); return; }
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 1280 }, frameRate: { ideal: 30 } },
-    });
+    await getCamera();
+    audio = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    // No camera permission for the page: the camera app still works.
+    // No camera permission for the page: the phone's camera app still works.
+    stopCamera();
     $('pick').value = ''; $('pick').click(); return;
   }
-  $('player').style.display = 'none';
-  $('recordBtn').classList.add('hidden'); $('uploadBtn').classList.add('hidden');
-  $('saveBtn').classList.add('hidden'); $('againBtn').classList.add('hidden');
-  $('recorder').classList.remove('hidden');
-  $('live').srcObject = stream;
-  chunks = [];
-  recorder = new MediaRecorder(stream, { mimeType: mp4Type, videoBitsPerSecond: 2000000, audioBitsPerSecond: 96000 });
+  $('player').pause();
+  setCount(LIMIT);
+  $('count').classList.remove('rec');
+  $('shutter').classList.remove('rec');
+  $('flip').classList.remove('hidden');
+  $('camHint').textContent = 'Tap the red button to start. Up to 30 seconds.';
+  show('camera');
+}
+$('flip').onclick = async () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  try { await getCamera(); } catch (e) { facing = facing === 'user' ? 'environment' : 'user'; }
+};
+
+// One frame of the camera into the 9:16 canvas: cover-cropped from the
+// centre, like the preview. Saved unmirrored, as the phone's camera saves.
+function draw() {
+  const v = $('live');
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if (vw && vh) {
+    const scale = Math.max(OUT_W / vw, OUT_H / vh);
+    const sw = OUT_W / scale, sh = OUT_H / scale;
+    ctx.drawImage(v, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, OUT_W, OUT_H);
+  }
+  drawing = requestAnimationFrame(draw);
+}
+
+function startRecording() {
+  draw();
+  const out = canvas.captureStream(30);
+  audio.getAudioTracks().forEach(t => out.addTrack(t));
+  chunks = []; discard = false;
+  recorder = new MediaRecorder(out, { mimeType: mp4Type, videoBitsPerSecond: 2500000, audioBitsPerSecond: 96000 });
   recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
   recorder.onstop = () => {
-    stream.getTracks().forEach(t => t.stop());
-    $('recorder').classList.add('hidden');
+    stopCamera();
+    if (discard) return;
     const blob = new Blob(chunks, { type: 'video/mp4' });
     file = new File([blob], 'message.mp4', { type: 'video/mp4' });
-    showVideo(URL.createObjectURL(blob));
-    $('status').textContent = 'Play it back. Happy with it? Save it.';
-    $('saveBtn').classList.remove('hidden');
-    $('againBtn').classList.remove('hidden');
+    review(URL.createObjectURL(blob), true);
   };
   let left = LIMIT;
-  $('count').textContent = left;
-  $('status').textContent = 'Recording… tap Stop when you are done.';
+  setCount(left);
+  $('count').classList.add('rec');
+  $('shutter').classList.add('rec');
+  $('camHint').textContent = 'Recording. Tap to stop.';
   recorder.start(1000);
   timer = setInterval(() => {
     left -= 1;
-    $('count').textContent = left;
+    setCount(Math.max(0, left));
     if (left <= 0) stopRecording();
   }, 1000);
 }
@@ -165,7 +266,10 @@ function stopRecording() {
   clearInterval(timer);
   if (recorder && recorder.state !== 'inactive') recorder.stop();
 }
-$('stopBtn').onclick = stopRecording;
+$('shutter').onclick = () => {
+  if (recorder && recorder.state === 'recording') stopRecording();
+  else startRecording();
+};
 
 $('saveBtn').onclick = async () => {
   if (!file) return;
@@ -173,10 +277,15 @@ $('saveBtn').onclick = async () => {
   $('bar').style.display = 'block';
   try {
     await putToS3(videoKey, file, file.type || 'video/mp4', p => $('fill').style.width = Math.round(p * 100) + '%');
+    $('reviewMsg').textContent = 'Saved. It plays inside the card when they open it.';
+    $('saveBtn').classList.add('hidden');
+    $('againBtn').textContent = 'Record a new one';
+    savedUrl = videoUrl + '?t=' + Date.now();
     $('status').innerHTML = '<span class="ok">Saved. It plays inside the card when they open it.</span>';
-    $('saveBtn').classList.add('hidden'); $('againBtn').textContent = 'Record a new one';
+    $('recordBtn').textContent = 'Record a new one';
+    $('watchBtn').classList.remove('hidden');
   } catch (e) {
-    $('status').innerHTML = '<span class="err">Could not save (' + (e.message || e) + '). Check the internet and try again.</span>';
+    $('reviewMsg').textContent = 'Could not save (' + (e.message || e) + '). Check the internet and try again.';
     $('saveBtn').disabled = false; $('saveBtn').textContent = 'Save this message';
   }
   $('bar').style.display = 'none';
